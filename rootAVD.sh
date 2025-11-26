@@ -894,7 +894,7 @@ GetPrettyVer() {
 
 DownLoadFile() {
 	CheckAVDIsOnline
-	if ("$AVDIsOnline"); then
+	if $AVDIsOnline; then
 		local URL="$1"
 		local SRC="$2"
 		local DST="$3"
@@ -1030,6 +1030,12 @@ CheckAvailableMagisks() {
 	local DLL_cnt=0
 
 	if [ -z $MAGISKVERCHOOSEN ]; then
+	        # FORCE LOCAL MAGISK, SKIP ONLINE MENU
+        MAGISK_DL="local"
+        MAGISKVERCHOOSEN=false
+        MAGISK_VER="$MAGISK_LOCL_VER"
+        MAGISK_CNL="local"
+        return
 
 		UFSH=$BASEDIR/assets/util_functions.sh
 		OF=$BASEDIR/download.tmp
@@ -1137,7 +1143,21 @@ InstallMagiskTemporarily() {
 	magiskispreinstalled=false
 
 	echo "[*] Searching for pre installed Magisk Apps"
-	PKG_NAMES=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+	mkdir -p "$TMP"
+    PKG_NAMES=""
+    (pm list packages magisk 2>/dev/null | cut -f 2 -d ":" > "$TMP/pm_out") &
+    local pm_pid=$!
+    local t=0
+    while kill -0 $pm_pid 2>/dev/null; do
+        sleep 1
+        t=$((t+1))
+        if [ $t -ge 10 ]; then
+            kill -9 $pm_pid 2>/dev/null
+            break
+        fi
+    done
+    [ -f "$TMP/pm_out" ] && PKG_NAMES=$(cat "$TMP/pm_out" | tr -d '\r')
+
 	PKG_NAME=""
 	local MAGISK_PKG_VER_CODE=""
 	local MAGISK_ZIP_VER_CODE=""
@@ -1188,53 +1208,50 @@ RemoveTemporarilyMagisk() {
 }
 
 TestingBusyBoxVersion() {
+        local busyboxworks=false
+        local RESULT=""
 
-	local busyboxworks=false
-	local RESULT=""
-	echo "[*] Testing Busybox $1"
+        echo "[*] Testing Busybox $1"
 
-	rm -fR $TMP
-	mkdir -p $TMP
+        ASH_STANDALONE=1 "$1" sh -c 'true' >/dev/null 2>&1
+        RESULT="$?"
+        if [[ "$RESULT" == "255" || "$RESULT" == "127" || "$RESULT" == "126" ]]; then
+                $busyboxworks && return 0 || return 1
+        fi
 
-	cd $TMP > /dev/null
-		$(ASH_STANDALONE=1 $1 sh -c 'grep' > /dev/null 2>&1)
-		RESULT="$?"
-		if [[ "$RESULT" != "255" ]]; then
-			$($1 unzip $MZ -oq > /dev/null 2>&1)
-			RESULT="$?"
-			if [[ "$RESULT" != "0" ]]; then
-				echo "[!] Busybox binary does not support extracting Magisk.zip"
-			else
-				busyboxworks=true
-			fi
-		fi
-	cd - > /dev/null
+        "$1" --list 2>/dev/null | "$1" grep -E "cpio|lz4|dd|mkdir" >/dev/null 2>&1
+        RESULT="$?"
+        if [[ "$RESULT" == "0" ]]; then
+                busyboxworks=true
+        fi
 
-	rm -fR $TMP
-	$busyboxworks && return 0 || return 1
+        $busyboxworks && return 0 || return 1
 }
 
-FindWorkingBusyBox() {
-	echo "[*] Finding a working Busybox Version"
-	local bbversion=""
-	local RESULT=""
 
-	for file in $(ls $BASEDIR/lib/*/*busybox*); do
-		chmod +x "$file"
-		bbversion=$($file | $file head -n 1)>/dev/null 2>&1
-		if [[ $bbversion == *"BusyBox"*"Magisk"*"multi-call"* ]]; then
-			TestingBusyBoxVersion "$file"
-			RESULT="$?"
-			if [[ "$RESULT" == "0" ]]; then
-				echo "[!] Found a working Busybox Version"
-				echo "[!] $bbversion"
-				export WorkingBusyBox="$file"
-				return
-			fi
-		fi
-	done
-	echo "[!] Can not find any working Busybox Version"
-	abort_script
+FindWorkingBusyBox() {
+        echo "[*] Finding a working Busybox Version"
+        local RESULT=""
+        for file in \
+          $BASEDIR/lib/x86_64/*busybox* \
+          $BASEDIR/lib/x86/*busybox* \
+          $BASEDIR/lib/arm64-v8a/*busybox* \
+          $BASEDIR/lib/armeabi-v7a/*busybox* \
+        ; do
+                [ -f "$file" ] || continue
+                chmod +x "$file"
+
+                TestingBusyBoxVersion "$file"
+                RESULT="$?"
+                if [[ "$RESULT" == "0" ]]; then
+                        echo "[!] Found a working Busybox Version"
+                        export WorkingBusyBox="$file"
+                        return
+                fi
+        done
+
+        echo "[!] Can not find any working Busybox Version"
+        abort_script
 }
 
 ExtractMagiskViaPM() {
@@ -1729,7 +1746,7 @@ patching_ramdisk(){
 
 
 rename_copy_magisk() {
-	if ( "$MAGISKVERCHOOSEN" ); then
+	if $MAGISKVERCHOOSEN; then
 		echo "[!] Copy Magisk.zip to Magisk.apk"
 		cp Magisk.zip Magisk.apk
 	else
