@@ -1153,11 +1153,15 @@ InstallMagiskTemporarily() {
 
 	echo "[*] Searching for pre installed Magisk Apps"
 	mkdir -p "$TMP"
-    PKG_NAMES=""
-    (pm list packages magisk 2>/dev/null | cut -f 2 -d ":" > "$TMP/pm_out") &
-    local pm_pid=$!
-    local t=0
-    while kill -0 $pm_pid 2>/dev/null; do
+	# Some script paths rely on UFSH; ensure it points to the extracted Magisk util_functions.sh
+	if [ -z "${UFSH:-}" ]; then
+		UFSH="$BASEDIR/assets/util_functions.sh"
+	fi
+	    PKG_NAMES=""
+	    (pm list packages magisk 2>/dev/null | cut -f 2 -d ":" > "$TMP/pm_out") &
+	    local pm_pid=$!
+	    local t=0
+	    while kill -0 $pm_pid 2>/dev/null; do
         sleep 1
         t=$((t+1))
         if [ $t -ge 10 ]; then
@@ -1174,29 +1178,31 @@ InstallMagiskTemporarily() {
 	if [[ "$PKG_NAMES" == "" ]]; then
 		echo "[!] Temporarily installing Magisk"
 		pm install -r $MZ >/dev/null 2>&1
-		PKG_NAME=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+		PKG_NAME=$(pm list packages magisk 2>/dev/null | cut -f 2 -d ":" | head -n 1) > /dev/null 2>&1
 	else
-		PKG_NAME=$PKG_NAMES
+		PKG_NAME=$(printf '%s\n' "$PKG_NAMES" | head -n 1)
 
-		$(pm dump --help > /dev/null 2>&1)
+		pm dump --help > /dev/null 2>&1
 		RESULT="$?"
 
 		if [[ "$RESULT" == "0" ]]; then
 			MAGISK_PKG_VER_CODE=$(pm dump $PKG_NAME | grep versionCode= | sed 's/.*versionCode=\([0-9]\{1,\}\).*/\1/')
 			#echo "MAGISK_PKG_VER_CODE=$MAGISK_PKG_VER_CODE"
-			MAGISK_ZIP_VER_CODE=$(grep $UFSH -e "MAGISK_VER_CODE" -w | sed 's/^.*=//')
+			if [ -f "$UFSH" ]; then
+				MAGISK_ZIP_VER_CODE=$(grep -w "MAGISK_VER_CODE" "$UFSH" 2>/dev/null | sed 's/^.*=//' | head -n 1)
+			fi
 			#echo "MAGISK_ZIP_VER_CODE=$MAGISK_ZIP_VER_CODE"
 			#echo "PKG_NAME=$PKG_NAME"
 		fi
 
-		if [[ "$MAGISK_PKG_VER_CODE" != "$MAGISK_ZIP_VER_CODE" ]]; then
+		if [[ "$MAGISK_PKG_VER_CODE" != "" && "$MAGISK_ZIP_VER_CODE" != "" && "$MAGISK_PKG_VER_CODE" != "$MAGISK_ZIP_VER_CODE" ]]; then
 			echo "[-] Magisk Versions differ"
 			echo "[*] Exchanging pre installed Magisk App Version $MAGISK_PKG_VER_CODE"
 			pm clear $PKG_NAME >/dev/null 2>&1
 			pm uninstall $PKG_NAME >/dev/null 2>&1
 			echo "[-] with the Magisk App Version $MAGISK_ZIP_VER_CODE"
 			pm install -r $MZ >/dev/null 2>&1
-			PKG_NAME=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+			PKG_NAME=$(pm list packages magisk 2>/dev/null | cut -f 2 -d ":" | head -n 1) > /dev/null 2>&1
 		fi
 		if [[ "$MAGISK_PKG_VER_CODE" == "" ]]; then
 			echo "[!] Found a pre installed Magisk App, use it"
@@ -1842,8 +1848,11 @@ find_next_pages() {
 
 update_lib_modules() {
 	local INITRAMFS=initramfs.img
-	if ("$AVDIsOnline"); then
-		if ( "$InstallPrebuiltKernelModules" ); then
+	if ( "$InstallPrebuiltKernelModules" ); then
+		CheckAVDIsOnline
+		if ! $AVDIsOnline; then
+			echo "[!] AVD appears to be offline, skip downloading prebuilt kernel modules"
+		else
 			local KERNEL_ARCH="x86-64"
 			if [[ $ABI == *"arm"* ]]; then
   				KERNEL_ARCH="arm64"
