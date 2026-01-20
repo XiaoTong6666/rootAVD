@@ -900,7 +900,7 @@ GetPrettyVer() {
 
 DownLoadFile() {
 	CheckAVDIsOnline
-	if ("$AVDIsOnline"); then
+	if $AVDIsOnline; then
 		local URL="$1"
 		local SRC="$2"
 		local DST="$3"
@@ -1039,6 +1039,12 @@ CheckAvailableMagisks() {
 	local DLL_cnt=0
 
 	if [ -z $MAGISKVERCHOOSEN ]; then
+	        # FORCE LOCAL MAGISK, SKIP ONLINE MENU
+        MAGISK_DL="local"
+        MAGISKVERCHOOSEN=false
+        MAGISK_VER="$MAGISK_LOCL_VER"
+        MAGISK_CNL="local"
+        return
 
 		UFSH=$BASEDIR/assets/util_functions.sh
 		OF=$BASEDIR/download.tmp
@@ -1146,7 +1152,25 @@ InstallMagiskTemporarily() {
 	magiskispreinstalled=false
 
 	echo "[*] Searching for pre installed Magisk Apps"
-	PKG_NAMES=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+	mkdir -p "$TMP"
+	# Some script paths rely on UFSH; ensure it points to the extracted Magisk util_functions.sh
+	if [ -z "${UFSH:-}" ]; then
+		UFSH="$BASEDIR/assets/util_functions.sh"
+	fi
+	    PKG_NAMES=""
+	    (pm list packages magisk 2>/dev/null | cut -f 2 -d ":" > "$TMP/pm_out") &
+	    local pm_pid=$!
+	    local t=0
+	    while kill -0 $pm_pid 2>/dev/null; do
+        sleep 1
+        t=$((t+1))
+        if [ $t -ge 10 ]; then
+            kill -9 $pm_pid 2>/dev/null
+            break
+        fi
+    done
+    [ -f "$TMP/pm_out" ] && PKG_NAMES=$(cat "$TMP/pm_out" | tr -d '\r')
+
 	PKG_NAME=""
 	local MAGISK_PKG_VER_CODE=""
 	local MAGISK_ZIP_VER_CODE=""
@@ -1154,29 +1178,31 @@ InstallMagiskTemporarily() {
 	if [[ "$PKG_NAMES" == "" ]]; then
 		echo "[!] Temporarily installing Magisk"
 		pm install -r $MZ >/dev/null 2>&1
-		PKG_NAME=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+		PKG_NAME=$(pm list packages magisk 2>/dev/null | cut -f 2 -d ":" | head -n 1) > /dev/null 2>&1
 	else
-		PKG_NAME=$PKG_NAMES
+		PKG_NAME=$(printf '%s\n' "$PKG_NAMES" | head -n 1)
 
-		$(pm dump --help > /dev/null 2>&1)
+		pm dump --help > /dev/null 2>&1
 		RESULT="$?"
 
 		if [[ "$RESULT" == "0" ]]; then
 			MAGISK_PKG_VER_CODE=$(pm dump $PKG_NAME | grep versionCode= | sed 's/.*versionCode=\([0-9]\{1,\}\).*/\1/')
 			#echo "MAGISK_PKG_VER_CODE=$MAGISK_PKG_VER_CODE"
-			MAGISK_ZIP_VER_CODE=$(grep $UFSH -e "MAGISK_VER_CODE" -w | sed 's/^.*=//')
+			if [ -f "$UFSH" ]; then
+				MAGISK_ZIP_VER_CODE=$(grep -w "MAGISK_VER_CODE" "$UFSH" 2>/dev/null | sed 's/^.*=//' | head -n 1)
+			fi
 			#echo "MAGISK_ZIP_VER_CODE=$MAGISK_ZIP_VER_CODE"
 			#echo "PKG_NAME=$PKG_NAME"
 		fi
 
-		if [[ "$MAGISK_PKG_VER_CODE" != "$MAGISK_ZIP_VER_CODE" ]]; then
+		if [[ "$MAGISK_PKG_VER_CODE" != "" && "$MAGISK_ZIP_VER_CODE" != "" && "$MAGISK_PKG_VER_CODE" != "$MAGISK_ZIP_VER_CODE" ]]; then
 			echo "[-] Magisk Versions differ"
 			echo "[*] Exchanging pre installed Magisk App Version $MAGISK_PKG_VER_CODE"
 			pm clear $PKG_NAME >/dev/null 2>&1
 			pm uninstall $PKG_NAME >/dev/null 2>&1
 			echo "[-] with the Magisk App Version $MAGISK_ZIP_VER_CODE"
 			pm install -r $MZ >/dev/null 2>&1
-			PKG_NAME=$(pm list packages magisk | cut -f 2 -d ":") > /dev/null 2>&1
+			PKG_NAME=$(pm list packages magisk 2>/dev/null | cut -f 2 -d ":" | head -n 1) > /dev/null 2>&1
 		fi
 		if [[ "$MAGISK_PKG_VER_CODE" == "" ]]; then
 			echo "[!] Found a pre installed Magisk App, use it"
@@ -1207,53 +1233,60 @@ RemoveTemporarilyMagisk() {
 }
 
 TestingBusyBoxVersion() {
+        local busyboxworks=false
+        local RESULT=""
 
-	local busyboxworks=false
-	local RESULT=""
-	echo "[*] Testing Busybox $1"
+        echo "[*] Testing Busybox $1"
 
-	rm -fR $TMP
-	mkdir -p $TMP
+        ASH_STANDALONE=1 "$1" sh -c 'true' >/dev/null 2>&1
+        RESULT="$?"
+        if [[ "$RESULT" == "255" || "$RESULT" == "127" || "$RESULT" == "126" ]]; then
+                $busyboxworks && return 0 || return 1
+        fi
 
-	cd $TMP > /dev/null
-		$(ASH_STANDALONE=1 $1 sh -c 'grep' > /dev/null 2>&1)
-		RESULT="$?"
-		if [[ "$RESULT" != "255" ]]; then
-			$($1 unzip $MZ -oq > /dev/null 2>&1)
-			RESULT="$?"
-			if [[ "$RESULT" != "0" ]]; then
-				echo "[!] Busybox binary does not support extracting Magisk.zip"
-			else
-				busyboxworks=true
-			fi
-		fi
-	cd - > /dev/null
+        "$1" --list 2>/dev/null | "$1" grep -E "cpio|lz4|dd|mkdir" >/dev/null 2>&1
+        RESULT="$?"
+        if [[ "$RESULT" == "0" ]]; then
+                busyboxworks=true
+        fi
 
-	rm -fR $TMP
-	$busyboxworks && return 0 || return 1
+        $busyboxworks && return 0 || return 1
 }
 
 FindWorkingBusyBox() {
-	echo "[*] Finding a working Busybox Version"
-	local bbversion=""
-	local RESULT=""
+        echo "[*] Finding a working Busybox Version"
+        local RESULT=""
 
-	for file in $(ls $BASEDIR/lib/*/*busybox*); do
-		chmod +x "$file"
-		bbversion=$($file | $file head -n 1)>/dev/null 2>&1
-		if [[ $bbversion == *"BusyBox"* ]]; then
-			TestingBusyBoxVersion "$file"
-			RESULT="$?"
-			if [[ "$RESULT" == "0" ]]; then
-				echo "[!] Found a working Busybox Version"
-				echo "[!] $bbversion"
-				export WorkingBusyBox="$file"
-				return
-			fi
-		fi
-	done
-	echo "[!] Can not find any working Busybox Version"
-	abort_script
+        for file in \
+          $BASEDIR/lib/x86_64/*busybox* \
+          $BASEDIR/lib/x86/*busybox* \
+          $BASEDIR/lib/arm64-v8a/*busybox* \
+          $BASEDIR/lib/armeabi-v7a/*busybox* \
+        ; do
+                [ -f "$file" ] || continue
+                chmod +x "$file"
+
+                TestingBusyBoxVersion "$file"
+                RESULT="$?"
+                if [[ "$RESULT" == "0" ]]; then
+                        echo "[!] Found a working Busybox Version"
+                        export WorkingBusyBox="$file"
+                        return
+                fi
+        done
+
+        echo "[!] Can not find any working Busybox Version"
+        abort_script
+}
+
+ExtractMagiskViaPM() {
+        InstallMagiskTemporarily
+        PKG_PATH=$(pm path $PKG_NAME)
+        PKG_PATH=${PKG_PATH%/*}
+        PKG_PATH=${PKG_PATH#*:}
+        echo "[*] Copy Magisk Lib Files to workdir"
+        cp -Rf $PKG_PATH/lib $BASEDIR/
+        RemoveTemporarilyMagisk
 }
 
 ExtractMagiskViaPM() {
@@ -1766,7 +1799,7 @@ patching_ramdisk(){
 }
 
 rename_copy_magisk() {
-	if ( "$MAGISKVERCHOOSEN" ); then
+	if $MAGISKVERCHOOSEN; then
 		echo "[!] Copy Magisk.zip to Magisk.apk"
 		cp Magisk.zip Magisk.apk
 	else
@@ -1815,8 +1848,11 @@ find_next_pages() {
 
 update_lib_modules() {
 	local INITRAMFS=initramfs.img
-	if ("$AVDIsOnline"); then
-		if ( "$InstallPrebuiltKernelModules" ); then
+	if ( "$InstallPrebuiltKernelModules" ); then
+		CheckAVDIsOnline
+		if ! $AVDIsOnline; then
+			echo "[!] AVD appears to be offline, skip downloading prebuilt kernel modules"
+		else
 			local KERNEL_ARCH="x86-64"
 			if [[ $ABI == *"arm"* ]]; then
   				KERNEL_ARCH="arm64"
